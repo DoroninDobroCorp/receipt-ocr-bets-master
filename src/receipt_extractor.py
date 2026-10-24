@@ -69,30 +69,54 @@ class ReceiptExtractor:
 
     @staticmethod
     def _to_str(v: Any) -> Optional[str]:
-        """Convert value to str, stripping whitespace, or None if empty."""
-        if v is None:
+        """Convert value to str, stripping whitespace, or None if empty or invalid."""
+        if v is None or isinstance(v, (bool, dict, list)):
             return None
         s = str(v).strip()
+        if s.lower() in ("null", "none"):
+            return None
         return s if s else None
+
+    @classmethod
+    def _parse_time_string(cls, t_raw: str) -> str:
+        """Parse time string with optional 12-hour AM/PM format into 24-hour HH:MM:SS."""
+        t_clean = t_raw.strip()
+        am_pm_match = re.search(r"(?i)\b(am|pm)\b", t_clean)
+        am_pm = am_pm_match.group(1).upper() if am_pm_match else None
+        numeric_part = re.sub(r"(?i)\s*(?:am|pm)\s*", "", t_clean).strip()
+
+        parts = [int(p) for p in numeric_part.split(":")]
+        h = parts[0]
+        m = parts[1]
+        s = parts[2] if len(parts) > 2 else 0
+
+        if am_pm == "PM" and h < 12:
+            h += 12
+        elif am_pm == "AM" and h == 12:
+            h = 0
+
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     @classmethod
     def _normalize_datetime(cls, raw: Any, image_name: str) -> Optional[str]:
         """
         Normalize date/time string to 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'.
-        Supports European betting slip date formats, ISO formats, and day-of-week prefixes.
+        Supports European betting slip date formats, ISO formats, AM/PM, and day-of-week prefixes.
         """
-        if not raw:
+        if raw is None or isinstance(raw, (bool, dict, list)):
             return None
         s = str(raw).strip()
-        if not s:
+        if not s or s.lower() in ("null", "none"):
             return None
 
         # Remove leading day-of-week prefixes like "Pet. ", "Sub. ", "Mon ", "ne"
         s = re.sub(r"^(?:[A-Za-zА-Яа-я]{2,4}\.?\s*|\b[a-z]{2}\b\s*)", "", s).strip()
+        # Remove trailing timezone identifiers or offsets like "Z", "UTC", "+02:00"
+        s = re.sub(r"(?i)\s*(?:z|utc|[+-]\d{2}:?\d{2})\s*$", "", s).strip()
 
-        # 1. Year first: YYYY/MM/DD, YYYY.MM.DD, YYYY-MM-DD (with T or space, optional ms)
+        # 1. Year first: YYYY/MM/DD, YYYY.MM.DD, YYYY-MM-DD (with T or space, optional ms & am/pm)
         m_year = re.match(
-            r"^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?$",
+            r"^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?)(?:\.\d+)?$",
             s,
         )
         if m_year:
@@ -102,17 +126,12 @@ class ReceiptExtractor:
                 int(m_year.group(3)),
                 m_year.group(4),
             )
-            parts = t.split(":")
-            t_norm = (
-                f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
-                if len(parts) == 3
-                else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
-            )
+            t_norm = cls._parse_time_string(t)
             return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
 
-        # 2. Day first: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (or 2-digit year) + time
+        # 2. Day first: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (or 2-digit year) + time (with optional am/pm)
         m_day = re.match(
-            r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?$",
+            r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?)(?:\.\d+)?$",
             s,
         )
         if m_day:
@@ -124,22 +143,12 @@ class ReceiptExtractor:
             )
             if y < 100:
                 y += 2000
-            parts = t.split(":")
-            t_norm = (
-                f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
-                if len(parts) == 3
-                else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
-            )
+            t_norm = cls._parse_time_string(t)
             return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
 
-        # 3. If time only: HH:MM:SS or HH:MM
-        if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", s):
-            parts = s.split(":")
-            t_norm = (
-                f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
-                if len(parts) == 3
-                else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
-            )
+        # 3. If time only: HH:MM:SS or HH:MM (with optional am/pm)
+        if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?", s):
+            t_norm = cls._parse_time_string(s)
             # If filename contains date pattern (e.g. photo_YYYY-MM-DD_...), stitch it
             mf = re.search(r"(\d{4})-(\d{2})-(\d{2})", image_name)
             if mf:
@@ -151,9 +160,11 @@ class ReceiptExtractor:
     @classmethod
     def _normalize_outcome(cls, raw: Any) -> Optional[str]:
         """Normalize outcome string (clean up handicap formatting and market names)."""
-        if not raw:
+        if raw is None or isinstance(raw, (bool, dict, list)):
             return None
         s = str(raw).strip().strip("'\"").strip()
+        if not s or s.lower() in ("null", "none"):
+            return None
 
         # Fix dot notation in handicap: 'HANDICAP 0.2' -> 'HANDICAP 0:2'
         s = re.sub(r"(?i)\b(handicap\s+)(\d)\.(\d)\b", r"\1\2:\3", s)
@@ -174,26 +185,35 @@ class ReceiptExtractor:
     @classmethod
     def _normalize_match(cls, raw: Any) -> Optional[str]:
         """Normalize match string (strip leading sport tags and clean extra spaces)."""
-        if not raw:
+        if raw is None or isinstance(raw, (bool, dict, list)):
             return None
         s = str(raw).strip().strip("'\"").strip()
+        if not s or s.lower() in ("null", "none"):
+            return None
+
         s = re.sub(
             r"(?i)^(?:football|soccer|basketball|tennis|hockey)\s*-\s*", "", s
         ).strip()
         s = re.sub(r"\s+", " ", s).strip()
         return s or None
 
-    def _normalize(self, payload: Dict[str, Any], image_name: str) -> Dict[str, Any]:
+    def _normalize(self, payload: Any, image_name: str) -> Dict[str, Any]:
         """
         Normalize raw API payload to strict schema using Pydantic.
 
         Args:
-            payload (Dict[str, Any]): Parsed JSON from model response.
+            payload (Any): Parsed JSON (dict or single-item list) from model response.
             image_name (str): Filename as fallback for source_image_id.
 
         Returns:
             Dict[str, Any]: Strictly ordered dictionary adhering to the project schema.
         """
+        if isinstance(payload, list) and len(payload) > 0 and isinstance(payload[0], dict):
+            payload = payload[0]
+
+        if not isinstance(payload, dict):
+            payload = {}
+
         # Validate through Pydantic
         output = ReceiptOutput.model_validate(payload)
 
@@ -259,6 +279,15 @@ class ReceiptExtractor:
 
         return _execute()
 
+    @staticmethod
+    def _clean_raw_json(raw: str) -> str:
+        """Strip surrounding markdown code blocks (e.g. ```json ... ```) if present."""
+        s = raw.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s*```$", "", s)
+        return s.strip()
+
     def extract(self, image_path: str) -> Dict[str, Any]:
         """
         Extract structured data from a betting receipt image.
@@ -284,8 +313,9 @@ class ReceiptExtractor:
         except Exception as e:
             raise RuntimeError(f"AI request failed: {e}") from e
 
+        cleaned_raw = self._clean_raw_json(raw)
         try:
-            data = json.loads(raw)
+            data = json.loads(cleaned_raw)
         except json.JSONDecodeError as e:
             raise RuntimeError(f"Failed to parse AI response as JSON: {e}") from e
 

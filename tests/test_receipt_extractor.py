@@ -73,6 +73,38 @@ class TestReceiptExtractor:
             "source_image_id": "fake.jpg",
         }
 
+    def test_extract_markdown_code_fences(
+        self, monkeypatch: Any, fake_image: Path
+    ) -> None:
+        """AI response wrapped in markdown ```json ... ``` blocks must be parsed."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            raw_text = "```json\n{\n  \"match\": \"Team A - Team B\",\n  \"odds\": 1.95\n}\n```"
+            return DummyResp(raw_text)
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+
+        result = extractor.extract(str(fake_image))
+        assert result["match"] == "Team A - Team B"
+        assert result["odds"] == 1.95
+
+    def test_extract_list_payload(
+        self, monkeypatch: Any, fake_image: Path
+    ) -> None:
+        """AI response returning a list of dicts [{...}] should unpack cleanly."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            raw_text = json.dumps([{"match": "Team A - Team B", "odds": 2.0}])
+            return DummyResp(raw_text)
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+
+        result = extractor.extract(str(fake_image))
+        assert result["match"] == "Team A - Team B"
+        assert result["odds"] == 2.0
+
     def test_extract_with_currency_in_stake_and_odds(
         self, monkeypatch: Any, fake_image: Path
     ) -> None:
@@ -129,6 +161,15 @@ class TestReceiptExtractor:
             extractor._normalize_datetime("08/03/2025 20:25:36", "test.jpg")
             == "2025-03-08 20:25:36"
         )
+        # 12-hour AM/PM format
+        assert (
+            extractor._normalize_datetime("08/03/2025 08:25:36 PM", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
+        assert (
+            extractor._normalize_datetime("08/03/2025 08:25 AM", "test.jpg")
+            == "2025-03-08 08:25:00"
+        )
         # DD.MM.YYYY
         assert (
             extractor._normalize_datetime("12.03.2025 13:54:12", "test.jpg")
@@ -149,9 +190,9 @@ class TestReceiptExtractor:
             extractor._normalize_datetime("2025.03.08 20:25:36", "test.jpg")
             == "2025-03-08 20:25:36"
         )
-        # ISO with T
+        # ISO with T and timezone Z
         assert (
-            extractor._normalize_datetime("2025-03-08T20:25:36", "test.jpg")
+            extractor._normalize_datetime("2025-03-08T20:25:36Z", "test.jpg")
             == "2025-03-08 20:25:36"
         )
         # ISO with fractional seconds
@@ -186,6 +227,7 @@ class TestReceiptExtractor:
         assert extractor._normalize_outcome("Tip: ug 0-1") == "ug 0-1"
         assert extractor._normalize_outcome("Over 2.5") == "Over 2.5"
         assert extractor._normalize_outcome("\"1\"") == "1"
+        assert extractor._normalize_outcome("null") is None
 
     def test_match_normalization(self, monkeypatch: Any) -> None:
         """Verify match normalizer strips sport prefixes and normalizes spaces."""
@@ -196,6 +238,7 @@ class TestReceiptExtractor:
             == "Team A - Team B"
         )
         assert extractor._normalize_match("  Team A   vs   Team B  ") == "Team A vs Team B"
+        assert extractor._normalize_match("null") is None
 
     def test_file_not_found(self, monkeypatch: Any) -> None:
         """Nonexistent image should raise FileNotFoundError."""

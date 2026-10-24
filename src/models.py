@@ -5,6 +5,7 @@ Pydantic data models for receipt extraction schema and validation.
 """
 
 from __future__ import annotations
+import math
 import re
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,16 +13,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 def parse_numeric_float(v: Any) -> Optional[float]:
     """
-    Extract a positive float from numeric or string values.
+    Extract a positive finite float from numeric or string values.
     Handles currency symbols, European/US decimal/thousand separators, and whitespace.
     """
-    if v is None:
+    if v is None or isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
         val = float(v)
-        return val if val > 0 else None
+        return val if (math.isfinite(val) and val > 0) else None
     if isinstance(v, str):
         s = v.strip()
+        if s.lower() in ("null", "none", "nan", "inf", "-inf"):
+            return None
         # Keep only digits, comma, dot, and plus/minus
         s = re.sub(r"[^\d,.\-+]", "", s)
         if not s:
@@ -43,7 +46,7 @@ def parse_numeric_float(v: Any) -> Optional[float]:
         if m:
             try:
                 val = float(m.group(0))
-                return val if val > 0 else None
+                return val if (math.isfinite(val) and val > 0) else None
             except ValueError:
                 return None
     return None
@@ -85,16 +88,18 @@ class ReceiptOutput(BaseModel):
     @field_validator("odds", "stake", mode="before")
     @classmethod
     def _parse_float(cls, v: Any) -> Optional[float]:
-        """Convert float/int/currency-separated strings to float or None."""
+        """Convert float/int/currency-separated strings to positive float or None."""
         return parse_numeric_float(v)
 
     @field_validator("bet_time", "match", "outcome", "source_image_id", mode="before")
     @classmethod
     def _parse_str(cls, v: Any) -> Optional[str]:
-        """Convert empty or whitespace strings to None."""
-        if v is None:
+        """Convert strings to clean values, ignoring booleans, dicts, lists, and literal nulls."""
+        if v is None or isinstance(v, (bool, dict, list)):
             return None
         s = str(v).strip()
+        if s.lower() in ("null", "none"):
+            return None
         return s if s else None
 
     def to_dict(self) -> Dict[str, Any]:
