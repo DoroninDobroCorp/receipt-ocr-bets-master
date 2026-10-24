@@ -161,6 +161,11 @@ class TestReceiptExtractor:
             extractor._normalize_datetime("08/03/2025 20:25:36", "test.jpg")
             == "2025-03-08 20:25:36"
         )
+        # MM/DD/YYYY (US format where month > 12 is caught)
+        assert (
+            extractor._normalize_datetime("10/25/2024 19:30:00", "test.jpg")
+            == "2024-10-25 19:30:00"
+        )
         # 12-hour AM/PM format
         assert (
             extractor._normalize_datetime("08/03/2025 08:25:36 PM", "test.jpg")

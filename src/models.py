@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 def parse_numeric_float(v: Any) -> Optional[float]:
     """
     Extract a positive finite float from numeric or string values.
-    Handles currency symbols, European/US decimal/thousand separators, and whitespace.
+    Handles currency symbols, European/US decimal/thousand separators, and fractional odds.
     """
     if v is None or isinstance(v, bool):
         return None
@@ -25,6 +25,19 @@ def parse_numeric_float(v: Any) -> Optional[float]:
         s = v.strip()
         if s.lower() in ("null", "none", "nan", "inf", "-inf"):
             return None
+
+        # Check for fractional format (e.g. fractional odds like "5/2")
+        if "/" in s:
+            m_frac = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", s)
+            if m_frac:
+                num, denom = int(m_frac.group(1)), int(m_frac.group(2))
+                if 0 < num < 1000 and 0 < denom < 1000:
+                    # Convert UK fractional odds to decimal odds (num/denom + 1)
+                    val = round(num / denom + 1.0, 2)
+                    return val if math.isfinite(val) and val > 0 else None
+            # If it's a date or complex code like "35107/44985", do not concatenate digits
+            return None
+
         # Keep only digits, comma, dot, and plus/minus
         s = re.sub(r"[^\d,.\-+]", "", s)
         if not s:

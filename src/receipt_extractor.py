@@ -101,7 +101,7 @@ class ReceiptExtractor:
     def _normalize_datetime(cls, raw: Any, image_name: str) -> Optional[str]:
         """
         Normalize date/time string to 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'.
-        Supports European betting slip date formats, ISO formats, AM/PM, and day-of-week prefixes.
+        Supports European/US betting slip date formats, ISO formats, AM/PM, and day prefixes.
         """
         if raw is None or isinstance(raw, (bool, dict, list)):
             return None
@@ -126,10 +126,14 @@ class ReceiptExtractor:
                 int(m_year.group(3)),
                 m_year.group(4),
             )
-            t_norm = cls._parse_time_string(t)
-            return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
+            # If month > 12 and day <= 12, swap
+            if mon > 12 and 1 <= d <= 12:
+                d, mon = mon, d
+            if 1 <= mon <= 12 and 1 <= d <= 31:
+                t_norm = cls._parse_time_string(t)
+                return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
 
-        # 2. Day first: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (or 2-digit year) + time (with optional am/pm)
+        # 2. Day/Month first: DD/MM/YYYY, MM/DD/YYYY, DD.MM.YYYY, DD-MM-YYYY
         m_day = re.match(
             r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?)(?:\.\d+)?$",
             s,
@@ -143,14 +147,18 @@ class ReceiptExtractor:
             )
             if y < 100:
                 y += 2000
-            t_norm = cls._parse_time_string(t)
-            return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
+            # If month > 12 and day <= 12, it is US format (MM/DD/YYYY)
+            if mon > 12 and 1 <= d <= 12:
+                d, mon = mon, d
+            if 1 <= mon <= 12 and 1 <= d <= 31:
+                t_norm = cls._parse_time_string(t)
+                return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
 
         # 3. If time only: HH:MM:SS or HH:MM (with optional am/pm)
         if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?", s):
             t_norm = cls._parse_time_string(s)
             # If filename contains date pattern (e.g. photo_YYYY-MM-DD_...), stitch it
-            mf = re.search(r"(\d{4})-(\d{2})-(\d{2})", image_name)
+            mf = re.search(r"(\d{4})[._-](\d{2})[._-](\d{2})", image_name)
             if mf:
                 return f"{mf.group(1)}-{mf.group(2)}-{mf.group(3)} {t_norm}"
             return t_norm

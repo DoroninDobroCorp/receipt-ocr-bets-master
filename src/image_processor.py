@@ -20,7 +20,7 @@ class ImageProcessor:
     def preprocess_image(cls, path: Path) -> Image.Image:
         """
         Open image, correct EXIF orientation, convert to RGB (with clean white background for alpha),
-        and downscale large images while preserving aspect ratio.
+        downscale large images while preserving aspect ratio, and apply tone-preserving contrast.
 
         Args:
             path (Path): Path to the image file.
@@ -51,8 +51,8 @@ class ImageProcessor:
                         Image.Resampling.LANCZOS,
                     )
 
-                # Enhance contrast with safe cutoff to improve OCR readability
-                img = ImageOps.autocontrast(img, cutoff=0.5)
+                # Enhance contrast preserving tone to avoid per-channel color cast
+                img = ImageOps.autocontrast(img, cutoff=0.5, preserve_tone=True)
 
                 # Return a memory copy so file handle can close safely
                 return img.copy()

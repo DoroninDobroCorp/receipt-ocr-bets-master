@@ -34,6 +34,11 @@ class TestModels:
         assert parse_numeric_float(-5.0) is None
         assert parse_numeric_float("-100.00") is None
 
+        # Fractional odds vs slash codes
+        assert parse_numeric_float("5/2") == 3.5
+        assert parse_numeric_float("35107/44985") is None
+        assert parse_numeric_float("08/03/2025") is None
+
         # Valid numbers and currencies
         assert parse_numeric_float(1.85) == 1.85
         assert parse_numeric_float("2.10") == 2.10
