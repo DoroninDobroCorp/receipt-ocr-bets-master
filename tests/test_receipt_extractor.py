@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 from PIL import Image
 
 from src.config import Config
@@ -17,8 +18,11 @@ from src.receipt_extractor import ReceiptExtractor
 
 class DummyResp:
     """Minimal stub for OpenAI chat.completions.create response."""
+
     def __init__(self, content: str) -> None:
-        self.choices = [type("obj", (), {"message": type("msg", (), {"content": content})})]
+        self.choices = [
+            type("obj", (), {"message": type("msg", (), {"content": content})})
+        ]
 
 
 @pytest.fixture
@@ -37,6 +41,7 @@ class TestReceiptExtractor:
         """Build extractor with fake env (no real .env needed)."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-dummy")
         monkeypatch.setenv("OPENAI_REQUEST_TIMEOUT", "5")
+        monkeypatch.setenv("OPENAI_MAX_RETRIES", "2")
         cfg = Config()
         return ReceiptExtractor(cfg)
 
@@ -68,11 +73,11 @@ class TestReceiptExtractor:
         }
 
     def test_extract_missing_fields(self, monkeypatch: Any, fake_image: Path) -> None:
-        """Missing fields must become None; schema must remain fixed."""
+        """Missing fields must become None; schema and key order must remain fixed."""
         extractor = self._prepare_extractor(monkeypatch)
 
         def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
-            return DummyResp(json.dumps({}))  # empty JSON
+            return DummyResp(json.dumps({}))
 
         monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
 
@@ -92,8 +97,140 @@ class TestReceiptExtractor:
         assert result["stake"] is None
         assert result["source_image_id"] == "fake.jpg"
 
+    def test_date_normalization(self, monkeypatch: Any, tmp_path: Path) -> None:
+        """Verify normalizer handles multiple real-world ticket date patterns."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        # DD/MM/YYYY
+        assert (
+            extractor._normalize_datetime("08/03/2025 20:25:36", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
+        # DD.MM.YYYY
+        assert (
+            extractor._normalize_datetime("12.03.2025 13:54:12", "test.jpg")
+            == "2025-03-12 13:54:12"
+        )
+        # DD.MM.YY with 2-digit year
+        assert (
+            extractor._normalize_datetime("09.11.24 19:41:26", "test.jpg")
+            == "2024-11-09 19:41:26"
+        )
+        # Day of week prefix
+        assert (
+            extractor._normalize_datetime("Pet. 08.11.2024 11:03:04", "test.jpg")
+            == "2024-11-08 11:03:04"
+        )
+
+        # Time-only with date in filename
+        time_img = tmp_path / "photo_2025-03-08_20-48-40.jpg"
+        Image.new("RGB", (10, 10)).save(time_img)
+        assert (
+            extractor._normalize_datetime("20:47:01", time_img.name)
+            == "2025-03-08 20:47:01"
+        )
+
+    def test_outcome_normalization(self, monkeypatch: Any) -> None:
+        """Verify outcome normalizer cleans market descriptions and punctuation."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        assert extractor._normalize_outcome("HANDICAP 0.2") == "HANDICAP 0:2"
+        assert extractor._normalize_outcome("HANDICAP 0:3 2") == "HANDICAP 0:3 2"
+        assert extractor._normalize_outcome("MATCH RESULT 1") == "1"
+        assert extractor._normalize_outcome("RESULT: 2") == "2"
+        assert extractor._normalize_outcome("RESULT - X") == "X"
+        assert extractor._normalize_outcome("Who will win the match? 1") == "1"
+        assert extractor._normalize_outcome("Tip: ug 0-1") == "ug 0-1"
+        assert extractor._normalize_outcome("Over 2.5") == "Over 2.5"
+
+    def test_match_normalization(self, monkeypatch: Any) -> None:
+        """Verify match normalizer strips sport prefixes."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        assert (
+            extractor._normalize_match("Football - Team A - Team B")
+            == "Team A - Team B"
+        )
+        assert extractor._normalize_match("Team A vs Team B") == "Team A vs Team B"
+
     def test_file_not_found(self, monkeypatch: Any) -> None:
         """Nonexistent image should raise FileNotFoundError."""
         extractor = self._prepare_extractor(monkeypatch)
         with pytest.raises(FileNotFoundError):
             extractor.extract("samples/does_not_exist.jpg")
+
+    def test_empty_ai_response(self, monkeypatch: Any, fake_image: Path) -> None:
+        """Empty AI response should raise RuntimeError."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            return DummyResp("")
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+        with pytest.raises(RuntimeError, match="Empty AI response"):
+            extractor.extract(str(fake_image))
+
+    def test_invalid_json_response(self, monkeypatch: Any, fake_image: Path) -> None:
+        """Malformed JSON from AI should raise RuntimeError."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            return DummyResp("{not-valid-json}")
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+        with pytest.raises(RuntimeError, match="Failed to parse AI response"):
+            extractor.extract(str(fake_image))
+
+    def test_retry_on_transient_failure_then_succeed(
+        self, monkeypatch: Any, fake_image: Path
+    ) -> None:
+        """Tenacity retries on transient connection error and succeeds on subsequent try."""
+        extractor = self._prepare_extractor(monkeypatch)
+        calls = 0
+
+        def flaky_create(*args: Any, **kwargs: Any) -> DummyResp:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise APIConnectionError(request=None)
+            payload = {
+                "bet_time": "2025-08-19 14:32:05",
+                "match": "Team A - Team B",
+                "outcome": "1",
+                "odds": 1.5,
+                "stake": 10.0,
+            }
+            return DummyResp(json.dumps(payload))
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", flaky_create)
+
+        result = extractor.extract(str(fake_image))
+        assert calls == 2
+        assert result["odds"] == 1.5
+
+    def test_api_timeout_error(self, monkeypatch: Any, fake_image: Path) -> None:
+        """APITimeoutError exhausted retries should be converted to TimeoutError."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            raise APITimeoutError(request=None)
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+        with pytest.raises(TimeoutError, match="AI request timeout"):
+            extractor.extract(str(fake_image))
+
+    def test_rate_limit_error(self, monkeypatch: Any, fake_image: Path) -> None:
+        """RateLimitError exhausted retries should raise RuntimeError."""
+        import httpx
+
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            resp = httpx.Response(
+                429, request=httpx.Request("POST", "https://api.openai.com/v1")
+            )
+            raise RateLimitError(message="rate limit hit", response=resp, body=None)
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+        with pytest.raises(RuntimeError, match="AI rate limit exceeded"):
+            extractor.extract(str(fake_image))

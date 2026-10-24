@@ -13,9 +13,36 @@ from dotenv import load_dotenv
 class Config:
     """Configuration loader for environment variables."""
 
-    def __init__(self) -> None:
-        load_dotenv()
-        self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
-        self.timeout: int = int(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        timeout: Optional[int] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        max_retries: Optional[int] = None,
+    ) -> None:
+        load_dotenv(override=False)
+
+        raw_api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self.api_key: str = raw_api_key.strip()
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is missing in .env")
+
+        timeout_env = os.getenv("OPENAI_REQUEST_TIMEOUT", "30")
+        try:
+            self.timeout: int = timeout if timeout is not None else int(timeout_env)
+        except ValueError:
+            self.timeout = 30
+
+        self.model: str = (model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")).strip()
+
+        raw_base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.base_url: Optional[str] = raw_base_url.strip() if raw_base_url else None
+
+        retries_env = os.getenv("OPENAI_MAX_RETRIES", "3")
+        try:
+            self.max_retries: int = (
+                max_retries if max_retries is not None else int(retries_env)
+            )
+        except ValueError:
+            self.max_retries = 3
