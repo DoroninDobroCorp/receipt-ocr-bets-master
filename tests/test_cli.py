@@ -148,6 +148,38 @@ class TestCLI:
         saved_data = json.loads(out_path.read_text(encoding="utf-8"))
         assert saved_data["odds"] == 2.1
 
+    def test_cli_save_to_directory_path(
+        self, monkeypatch: Any, tmp_path: Path, capsys: Any
+    ) -> None:
+        """When directory path is passed as output, saves as <dir>/<image_stem>.json."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-dummy")
+        img_path = tmp_path / "check_slip.jpg"
+        Image.new("RGB", (20, 20), color="white").save(img_path)
+
+        out_dir = tmp_path / "outputs"
+        monkeypatch.setattr("sys.argv", ["cli.py", str(img_path), str(out_dir) + "/"])
+
+        fake_payload = {
+            "bet_time": "2025-08-19 14:32:05",
+            "match": "Team A vs Team B",
+            "outcome": "1",
+            "odds": 1.9,
+            "stake": 50.0,
+        }
+
+        monkeypatch.setattr(
+            ReceiptExtractor,
+            "_call_model_with_retry",
+            lambda self, b64: json.dumps(fake_payload),
+        )
+
+        run()
+
+        expected_file = out_dir / "check_slip.json"
+        assert expected_file.exists()
+        saved_data = json.loads(expected_file.read_text(encoding="utf-8"))
+        assert saved_data["odds"] == 1.9
+
     def test_save_error_creates_directory_safely(self, tmp_path: Path) -> None:
         """_save_error safely creates missing directory structure."""
         out_path = tmp_path / "sub" / "error.json"

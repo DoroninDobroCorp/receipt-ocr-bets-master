@@ -20,7 +20,7 @@ from tenacity import (
 
 from .config import Config
 from .image_processor import ImageProcessor
-from .models import ReceiptOutput
+from .models import ReceiptOutput, parse_numeric_float
 
 
 class ReceiptExtractor:
@@ -64,15 +64,8 @@ class ReceiptExtractor:
 
     @staticmethod
     def _to_float(v: Any) -> Optional[float]:
-        """Convert value to float, handling commas and empty strings."""
-        if v is None:
-            return None
-        try:
-            if isinstance(v, str):
-                v = v.replace(",", ".").strip()
-            return float(v)
-        except Exception:
-            return None
+        """Convert value to float, handling currencies, commas, and empty strings."""
+        return parse_numeric_float(v)
 
     @staticmethod
     def _to_str(v: Any) -> Optional[str]:
@@ -86,39 +79,63 @@ class ReceiptExtractor:
     def _normalize_datetime(cls, raw: Any, image_name: str) -> Optional[str]:
         """
         Normalize date/time string to 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'.
-        Supports common European betting slip date formats and day-of-week prefixes.
+        Supports European betting slip date formats, ISO formats, and day-of-week prefixes.
         """
         if not raw:
             return None
         s = str(raw).strip()
+        if not s:
+            return None
 
-        # Remove leading day-of-week prefixes like "Pet. ", "Sub. ", "Mon ", "ne19:35"
+        # Remove leading day-of-week prefixes like "Pet. ", "Sub. ", "Mon ", "ne"
         s = re.sub(r"^(?:[A-Za-zА-Яа-я]{2,4}\.?\s*|\b[a-z]{2}\b\s*)", "", s).strip()
 
-        # Already normalized: YYYY-MM-DD HH:MM:SS
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", s):
-            return re.sub(r"\s+", " ", s)
-
-        # DD/MM/YYYY or DD.MM.YYYY or DD-MM-YYYY (with optional 2-digit year) + time
-        m = re.match(
-            r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\s+(\d{1,2}:\d{2}(?::\d{2})?)$",
+        # 1. Year first: YYYY/MM/DD, YYYY.MM.DD, YYYY-MM-DD (with T or space, optional ms)
+        m_year = re.match(
+            r"^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?$",
             s,
         )
-        if m:
-            d, mon, y, t = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+        if m_year:
+            y, mon, d, t = (
+                int(m_year.group(1)),
+                int(m_year.group(2)),
+                int(m_year.group(3)),
+                m_year.group(4),
+            )
+            parts = t.split(":")
+            t_norm = (
+                f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
+                if len(parts) == 3
+                else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
+            )
+            return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
+
+        # 2. Day first: DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY (or 2-digit year) + time
+        m_day = re.match(
+            r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})[T\s]+(\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?$",
+            s,
+        )
+        if m_day:
+            d, mon, y, t = (
+                int(m_day.group(1)),
+                int(m_day.group(2)),
+                int(m_day.group(3)),
+                m_day.group(4),
+            )
             if y < 100:
                 y += 2000
             parts = t.split(":")
-            if len(parts) == 2:
-                t = f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
-            else:
-                t = f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
-            return f"{y:04d}-{mon:02d}-{d:02d} {t}"
+            t_norm = (
+                f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
+                if len(parts) == 3
+                else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
+            )
+            return f"{y:04d}-{mon:02d}-{d:02d} {t_norm}"
 
-        # If time only: HH:MM:SS or HH:MM
+        # 3. If time only: HH:MM:SS or HH:MM
         if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", s):
             parts = s.split(":")
-            t = (
+            t_norm = (
                 f"{int(parts[0]):02d}:{int(parts[1]):02d}:{int(parts[2]):02d}"
                 if len(parts) == 3
                 else f"{int(parts[0]):02d}:{int(parts[1]):02d}:00"
@@ -126,8 +143,8 @@ class ReceiptExtractor:
             # If filename contains date pattern (e.g. photo_YYYY-MM-DD_...), stitch it
             mf = re.search(r"(\d{4})-(\d{2})-(\d{2})", image_name)
             if mf:
-                return f"{mf.group(1)}-{mf.group(2)}-{mf.group(3)} {t}"
-            return t
+                return f"{mf.group(1)}-{mf.group(2)}-{mf.group(3)} {t_norm}"
+            return t_norm
 
         return s
 
@@ -136,7 +153,7 @@ class ReceiptExtractor:
         """Normalize outcome string (clean up handicap formatting and market names)."""
         if not raw:
             return None
-        s = str(raw).strip()
+        s = str(raw).strip().strip("'\"").strip()
 
         # Fix dot notation in handicap: 'HANDICAP 0.2' -> 'HANDICAP 0:2'
         s = re.sub(r"(?i)\b(handicap\s+)(\d)\.(\d)\b", r"\1\2:\3", s)
@@ -156,13 +173,14 @@ class ReceiptExtractor:
 
     @classmethod
     def _normalize_match(cls, raw: Any) -> Optional[str]:
-        """Normalize match string (strip leading sport tags)."""
+        """Normalize match string (strip leading sport tags and clean extra spaces)."""
         if not raw:
             return None
-        s = str(raw).strip()
+        s = str(raw).strip().strip("'\"").strip()
         s = re.sub(
             r"(?i)^(?:football|soccer|basketball|tennis|hockey)\s*-\s*", "", s
         ).strip()
+        s = re.sub(r"\s+", " ", s).strip()
         return s or None
 
     def _normalize(self, payload: Dict[str, Any], image_name: str) -> Dict[str, Any]:

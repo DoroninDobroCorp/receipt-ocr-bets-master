@@ -5,8 +5,48 @@ Pydantic data models for receipt extraction schema and validation.
 """
 
 from __future__ import annotations
+import re
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def parse_numeric_float(v: Any) -> Optional[float]:
+    """
+    Extract a positive float from numeric or string values.
+    Handles currency symbols, European/US decimal/thousand separators, and whitespace.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        val = float(v)
+        return val if val > 0 else None
+    if isinstance(v, str):
+        s = v.strip()
+        # Keep only digits, comma, dot, and plus/minus
+        s = re.sub(r"[^\d,.\-+]", "", s)
+        if not s:
+            return None
+
+        # Handle thousand and decimal separators if both exist
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                # European style: 1.000,50 -> 1000.50
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                # US style: 1,000.50 -> 1000.50
+                s = s.replace(",", "")
+        elif "," in s:
+            # European decimal comma: 100,00 -> 100.00
+            s = s.replace(",", ".")
+
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+        if m:
+            try:
+                val = float(m.group(0))
+                return val if val > 0 else None
+            except ValueError:
+                return None
+    return None
 
 
 class ReceiptOutput(BaseModel):
@@ -45,20 +85,8 @@ class ReceiptOutput(BaseModel):
     @field_validator("odds", "stake", mode="before")
     @classmethod
     def _parse_float(cls, v: Any) -> Optional[float]:
-        """Convert float/int/comma-separated strings to float or None."""
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, str):
-            cleaned = v.replace(",", ".").strip()
-            if not cleaned:
-                return None
-            try:
-                return float(cleaned)
-            except ValueError:
-                return None
-        return None
+        """Convert float/int/currency-separated strings to float or None."""
+        return parse_numeric_float(v)
 
     @field_validator("bet_time", "match", "outcome", "source_image_id", mode="before")
     @classmethod

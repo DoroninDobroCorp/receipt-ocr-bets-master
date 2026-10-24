@@ -30,7 +30,10 @@ class Config:
 
         timeout_env = os.getenv("OPENAI_REQUEST_TIMEOUT", "30")
         try:
-            self.timeout: int = timeout if timeout is not None else int(timeout_env)
+            parsed_timeout: int = (
+                timeout if timeout is not None else int(timeout_env)
+            )
+            self.timeout: int = max(1, parsed_timeout)
         except ValueError:
             self.timeout = 30
 
@@ -41,8 +44,9 @@ class Config:
 
         retries_env = os.getenv("OPENAI_MAX_RETRIES", "3")
         try:
-            self.max_retries: int = (
+            parsed_retries: int = (
                 max_retries if max_retries is not None else int(retries_env)
             )
+            self.max_retries: int = max(1, parsed_retries)
         except ValueError:
             self.max_retries = 3

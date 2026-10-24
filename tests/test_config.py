@@ -40,3 +40,13 @@ class TestConfig:
 
         cfg = Config()
         assert cfg.timeout == 30
+
+    def test_minimum_boundaries_for_timeout_and_retries(self, monkeypatch: Any) -> None:
+        """Zero or negative values should be normalized to at least 1."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-key")
+        monkeypatch.setenv("OPENAI_REQUEST_TIMEOUT", "-10")
+        monkeypatch.setenv("OPENAI_MAX_RETRIES", "0")
+
+        cfg = Config()
+        assert cfg.timeout >= 1
+        assert cfg.max_retries >= 1

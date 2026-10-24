@@ -19,21 +19,29 @@ class ImageProcessor:
     @classmethod
     def preprocess_image(cls, path: Path) -> Image.Image:
         """
-        Open image, correct EXIF orientation, convert to RGB,
+        Open image, correct EXIF orientation, convert to RGB (with clean white background for alpha),
         and downscale large images while preserving aspect ratio.
 
         Args:
             path (Path): Path to the image file.
 
         Returns:
-            Image.Image: Preprocessed PIL Image.
+            Image.Image: Preprocessed PIL Image in RGB mode.
         """
         try:
-            with Image.open(path) as img:
+            with Image.open(path) as raw_img:
                 # Correct EXIF rotation (critical for mobile phone camera shots)
-                img = ImageOps.exif_transpose(img)
+                img = ImageOps.exif_transpose(raw_img)
 
-                if img.mode != "RGB":
+                # Composite transparent images (RGBA / LA / transparent palette) over white background
+                if img.mode in ("RGBA", "LA") or (
+                    img.mode == "P" and "transparency" in img.info
+                ):
+                    rgba_img = img.convert("RGBA")
+                    bg = Image.new("RGB", rgba_img.size, (255, 255, 255))
+                    bg.paste(rgba_img, mask=rgba_img.split()[3])
+                    img = bg
+                elif img.mode != "RGB":
                     img = img.convert("RGB")
 
                 # Downscale if exceeding MAX_DIMENSION to save network bandwidth and tokens

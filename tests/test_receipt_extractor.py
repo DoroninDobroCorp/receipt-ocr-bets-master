@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import httpx
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 from PIL import Image
 
@@ -72,6 +73,28 @@ class TestReceiptExtractor:
             "source_image_id": "fake.jpg",
         }
 
+    def test_extract_with_currency_in_stake_and_odds(
+        self, monkeypatch: Any, fake_image: Path
+    ) -> None:
+        """Stake and odds with currencies and thousand separators must parse properly."""
+        extractor = self._prepare_extractor(monkeypatch)
+
+        def fake_create(*args: Any, **kwargs: Any) -> DummyResp:
+            payload = {
+                "bet_time": "2025-08-19 14:32:05",
+                "match": "Team A vs Team B",
+                "outcome": "1",
+                "odds": "2.10x",
+                "stake": "EUR 1.000,50",
+            }
+            return DummyResp(json.dumps(payload))
+
+        monkeypatch.setattr(extractor.client.chat.completions, "create", fake_create)
+
+        result = extractor.extract(str(fake_image))
+        assert result["odds"] == 2.1
+        assert result["stake"] == 1000.5
+
     def test_extract_missing_fields(self, monkeypatch: Any, fake_image: Path) -> None:
         """Missing fields must become None; schema and key order must remain fixed."""
         extractor = self._prepare_extractor(monkeypatch)
@@ -116,6 +139,26 @@ class TestReceiptExtractor:
             extractor._normalize_datetime("09.11.24 19:41:26", "test.jpg")
             == "2024-11-09 19:41:26"
         )
+        # YYYY/MM/DD
+        assert (
+            extractor._normalize_datetime("2025/03/08 20:25:36", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
+        # YYYY.MM.DD
+        assert (
+            extractor._normalize_datetime("2025.03.08 20:25:36", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
+        # ISO with T
+        assert (
+            extractor._normalize_datetime("2025-03-08T20:25:36", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
+        # ISO with fractional seconds
+        assert (
+            extractor._normalize_datetime("2025-03-08 20:25:36.456", "test.jpg")
+            == "2025-03-08 20:25:36"
+        )
         # Day of week prefix
         assert (
             extractor._normalize_datetime("Pet. 08.11.2024 11:03:04", "test.jpg")
@@ -142,16 +185,17 @@ class TestReceiptExtractor:
         assert extractor._normalize_outcome("Who will win the match? 1") == "1"
         assert extractor._normalize_outcome("Tip: ug 0-1") == "ug 0-1"
         assert extractor._normalize_outcome("Over 2.5") == "Over 2.5"
+        assert extractor._normalize_outcome("\"1\"") == "1"
 
     def test_match_normalization(self, monkeypatch: Any) -> None:
-        """Verify match normalizer strips sport prefixes."""
+        """Verify match normalizer strips sport prefixes and normalizes spaces."""
         extractor = self._prepare_extractor(monkeypatch)
 
         assert (
             extractor._normalize_match("Football - Team A - Team B")
             == "Team A - Team B"
         )
-        assert extractor._normalize_match("Team A vs Team B") == "Team A vs Team B"
+        assert extractor._normalize_match("  Team A   vs   Team B  ") == "Team A vs Team B"
 
     def test_file_not_found(self, monkeypatch: Any) -> None:
         """Nonexistent image should raise FileNotFoundError."""
@@ -221,8 +265,6 @@ class TestReceiptExtractor:
 
     def test_rate_limit_error(self, monkeypatch: Any, fake_image: Path) -> None:
         """RateLimitError exhausted retries should raise RuntimeError."""
-        import httpx
-
         extractor = self._prepare_extractor(monkeypatch)
 
         def fake_create(*args: Any, **kwargs: Any) -> DummyResp:

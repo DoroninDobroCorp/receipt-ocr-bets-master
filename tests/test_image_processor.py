@@ -33,6 +33,20 @@ class TestImageProcessor:
         b64 = ImageProcessor.encode_to_base64(img_path)
         assert isinstance(b64, str)
 
+    def test_transparent_png_composited_over_white(self, tmp_path: Path) -> None:
+        """Transparent pixels must become white rather than turning solid black."""
+        img_path = tmp_path / "transparent.png"
+        # Create transparent image with one dark pixel
+        im = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        im.putpixel((5, 5), (0, 0, 0, 255))
+        im.save(img_path)
+
+        processed = ImageProcessor.preprocess_image(img_path)
+        assert processed.mode == "RGB"
+        # Background pixel should be white, not black
+        bg_pixel = processed.getpixel((0, 0))
+        assert bg_pixel == (255, 255, 255)
+
     def test_downscale_large_image(self, tmp_path: Path) -> None:
         """Images larger than MAX_DIMENSION should be safely downscaled."""
         img_path = tmp_path / "large.jpg"
